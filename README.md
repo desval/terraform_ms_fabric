@@ -66,6 +66,9 @@ Per workspace, the module creates:
 - 4 Entra ID security groups (`admin`, `member`, `contributor`, `viewer`)
 - 4 Fabric workspace role assignments (one per group)
 
+This reflects the current layout (Option B). For the resource counts under other
+workspace layouts, see [§3 What gets created per option](#3-ms-fabric-workspace-layout).
+
 ## Naming conventions
 
 | Resource | Pattern | Example |
@@ -205,32 +208,235 @@ workflow baked into the platform.
 
 **One workspace per medallion layer per environment** — nine workspaces total.
 
-#### Alternatives considered
+#### The design space
 
-**A — One workspace per environment**
+Workspace layout is the product of up to three independent dimensions:
 
-All three lakehouses (bronze, silver, gold) inside a single workspace per env.
-Simpler in the UI, but all three layers share the same permission boundary. You
-cannot grant a data consumer Gold-only read access without also exposing Bronze and
-Silver.
+| Dimension | Values | Fixed? |
+|---|---|---|
+| Environment | `dev` / `test` / `prod` | Yes — always a separate workspace |
+| Layer | `bronze` / `silver` / `gold` | Yes — drives the permission boundary |
+| Data source / domain | `salesforce`, `sap`, `web`, … | Optional — the variable you are weighing |
 
-**B — One workspace per layer per environment (chosen)**
+Environment is non-negotiable (it is the blast-radius and capacity boundary). The
+real decision is how finely you slice the **layer** and **data-source** dimensions.
+The four options below are ordered from coarsest to finest. Total workspace count is
+shown for the three-environment case.
+
+#### Option A — One workspace per environment (3 workspaces)
+
+All three lakehouses live inside a single workspace per environment.
+
+```
+dev    ── bronze_lh, silver_lh, gold_lh
+test   ── bronze_lh, silver_lh, gold_lh
+prod   ── bronze_lh, silver_lh, gold_lh
+```
+
+Simplest to operate, but all three layers share one permission boundary. You cannot
+grant a consumer Gold-only read access without also exposing Bronze and Silver. Fine
+for a prototype or a single small team; outgrown quickly.
+
+#### Option B — One workspace per layer per environment (9 workspaces, chosen)
+
+```
+dev-bronze    dev-silver    dev-gold
+test-bronze   test-silver   test-gold
+prod-bronze   prod-silver   prod-gold
+```
 
 Each layer has its own permission boundary. A Gold consumer group has `Viewer` on
-`prod-gold` and zero access to `prod-bronze` or `prod-silver`.
+`prod-gold` and zero access to `prod-bronze` or `prod-silver`. This is the current
+layout. Trade-off accepted: nine workspaces, and cross-layer data flow requires
+OneLake shortcuts (see §9). All sources land together in the single `{env}-bronze`
+workspace — fine until sources multiply or need separate ownership/schedules.
 
-Trade-off accepted: nine workspaces instead of three. Cross-workspace data flow
-requires OneLake shortcuts (see §9).
+#### Option C — Per data source at Bronze, per layer above (chosen if sources grow)
 
-**C — Domain-driven layout**
+This is the "one workspace per data source" idea applied where it actually pays off:
+the **Bronze** layer, where raw ingestion happens. Each source has its own ingestion
+logic, schedule, and owning team, so each gets its own workspace. Silver and Gold
+stay per-layer because by then data is conformed and modelled by domain, not by
+source.
 
 ```
-dev-finance-bronze / dev-finance-silver / dev-finance-gold
-dev-logistics-bronze / ...
+dev-bronze-salesforce    dev-bronze-sap    dev-bronze-web    dev-silver    dev-gold
+test-bronze-salesforce   test-bronze-sap   test-bronze-web   test-silver   test-gold
+prod-bronze-salesforce   prod-bronze-sap   prod-bronze-web   prod-silver   prod-gold
 ```
 
-Start with option B and move here when a second data domain is introduced — adding
-a `domain` variable to the module is straightforward.
+Count: `(N_sources + 2) × 3 environments`. With 3 sources → 15 workspaces.
+
+Benefits: each source team owns and is billed for its own ingestion workspace;
+a noisy or broken source is isolated; onboarding a new source is a single new module
+call, no change to existing workspaces. Trade-off: more workspaces, and Silver now
+reads from several Bronze workspaces via shortcuts instead of one.
+
+#### Option D — Full data-source / domain across all layers (N × 9)
+
+Every domain gets its own bronze/silver/gold stack per environment.
+
+```
+dev-finance-bronze    dev-finance-silver    dev-finance-gold
+dev-logistics-bronze  dev-logistics-silver  dev-logistics-gold
+prod-finance-bronze   prod-finance-silver   prod-finance-gold
+...
+```
+
+Count: `N_domains × 3 layers × 3 environments`. With 2 domains → 18 workspaces.
+
+Maximum isolation and clear domain ownership end-to-end (a data-mesh shape). Cost:
+workspace count grows fast and cross-domain Gold reporting needs more shortcuts. Only
+justified once domains have genuinely separate teams and governance.
+
+#### Comparison
+
+| Option | Workspaces (3 env) | Bronze split by | Silver/Gold split by | Use when |
+|---|---|---|---|---|
+| A | 3 | — | — | Prototype, one small team |
+| B (chosen) | 9 | — | layer | Few sources, one data team |
+| C | (N+2)×3 | data source | layer | Many sources / per-source ownership |
+| D | N×9 | domain | domain | Multiple autonomous domain teams |
+
+#### What gets created per option
+
+Every workspace is built from the same block: **1 Fabric workspace · 1 lakehouse ·
+4 Entra ID security groups (admin/member/contributor/viewer) · 4 role assignments**
+= 10 resources. (Option A is the exception — it puts 3 lakehouses in one workspace
+and scopes the 4 groups to that single workspace, so its permission boundary is the
+whole environment.)
+
+Totals are given for the three-environment case. `N` = number of data sources (C) or
+domains (D).
+
+**Option A — one workspace per environment (3 workspaces)**
+
+| Resource | Per environment | Total (×3) |
+|---|---|---|
+| Fabric workspace | 1 | 3 |
+| Lakehouse | 3 (bronze/silver/gold) | 9 |
+| Entra ID group | 4 | 12 |
+| Role assignment | 4 | 12 |
+
+**Option B — one workspace per layer per environment (9 workspaces, chosen)**
+
+| Resource | Per workspace | Total (9 ws) |
+|---|---|---|
+| Fabric workspace | 1 | 9 |
+| Lakehouse | 1 | 9 |
+| Entra ID group | 4 | 36 |
+| Role assignment | 4 | 36 |
+
+**Option C — per source at Bronze, per layer above ((N+2)×3 workspaces)**
+
+Worked example with **N = 3** sources → `(3+2)×3 = 15` workspaces:
+
+| Resource | Per workspace | Total (15 ws) | Formula |
+|---|---|---|---|
+| Fabric workspace | 1 | 15 | `(N+2)×3` |
+| Lakehouse | 1 | 15 | `(N+2)×3` |
+| Entra ID group | 4 | 60 | `(N+2)×3×4` |
+| Role assignment | 4 | 60 | `(N+2)×3×4` |
+
+**Option D — full data-source/domain across all layers (N×9 workspaces)**
+
+Worked example with **N = 2** domains → `2×9 = 18` workspaces:
+
+| Resource | Per workspace | Total (18 ws) | Formula |
+|---|---|---|---|
+| Fabric workspace | 1 | 18 | `N×3×3` |
+| Lakehouse | 1 | 18 | `N×3×3` |
+| Entra ID group | 4 | 72 | `N×3×3×4` |
+| Role assignment | 4 | 72 | `N×3×3×4` |
+
+#### How the module supports this
+
+The `fabric_layer_workspace` module already takes the workspace name as input, so
+moving from B to C or D is additive — you add `source` or `domain` to the naming
+pattern and add module calls. No existing workspace is renamed or destroyed if you
+keep B's names stable and only **add** new source/domain workspaces alongside them.
+
+#### What each option means in Terraform code
+
+The duplication *between* environment directories is the same for every option (it is
+the deliberate blast-radius isolation from §1/§8). What changes is the shape of
+`main.tf` *inside* each directory:
+
+**Option A** — three lakehouses in one workspace, so the module is called once and
+takes a list of lakehouses (or the module is reshaped to own all three):
+
+```hcl
+module "workspace" {
+  source     = "../../modules/fabric_layer_workspace"
+  name       = var.env
+  lakehouses = ["bronze", "silver", "gold"]
+}
+```
+
+**Option B (current)** — three explicit, hand-written module calls per directory.
+Readable and greppable; duplication is low and constant (3 blocks):
+
+```hcl
+module "bronze" { source = "../../modules/fabric_layer_workspace"; name = "${var.env}-bronze" }
+module "silver" { source = "../../modules/fabric_layer_workspace"; name = "${var.env}-silver" }
+module "gold"   { source = "../../modules/fabric_layer_workspace"; name = "${var.env}-gold"   }
+```
+
+**Option C** — Bronze becomes a single `for_each` over a source list, so adding a
+source is a one-line `tfvars` edit, not a new module block. Silver/Gold stay
+explicit:
+
+```hcl
+module "bronze" {
+  for_each = toset(var.bronze_sources)            # ["salesforce", "sap", "web"]
+  source   = "../../modules/fabric_layer_workspace"
+  name     = "${var.env}-bronze-${each.key}"
+}
+module "silver" { source = "../../modules/fabric_layer_workspace"; name = "${var.env}-silver" }
+module "gold"   { source = "../../modules/fabric_layer_workspace"; name = "${var.env}-gold"   }
+```
+
+**Option D** — a nested `for_each` (domain × layer), typically driven by a map. Most
+compact in code, but the indirection means you can no longer read off exactly what
+exists without resolving the loop:
+
+```hcl
+locals {
+  stacks = { for pair in setproduct(var.domains, ["bronze", "silver", "gold"]) :
+             "${pair[0]}-${pair[1]}" => { domain = pair[0], layer = pair[1] } }
+}
+module "stack" {
+  for_each = local.stacks
+  source   = "../../modules/fabric_layer_workspace"
+  name     = "${var.env}-${each.value.domain}-${each.value.layer}"
+}
+```
+
+Degree of duplication / readability trade-off:
+
+| Option | Module calls per directory | Add a workspace by | Readability |
+|---|---|---|---|
+| A | 1 | editing the lakehouse list | Highest |
+| B | 3 explicit | adding a module block | High |
+| C | 2 explicit + 1 `for_each` | one line in `tfvars` | Good |
+| D | 1 `for_each` (map) | one line in `tfvars` | Lowest — needs loop resolution |
+
+`for_each` (C/D) trades read-it-off-the-page clarity for less code and friction-free
+growth. Stay explicit (B) while the list is short enough to read at a glance; reach
+for `for_each` once you are adding sources or domains regularly.
+
+#### Recommendation
+
+Start at **B**. Move Bronze to **C** the moment you have more than ~2–3 data sources
+or a source needs its own owner, schedule, or capacity. Reserve **D** for when whole
+domains have separate teams — adopting it earlier buys isolation you are not yet
+paying the coordination cost to need.
+
+#### When to revisit
+
+Re-evaluate whenever you add a data source (does it deserve its own Bronze
+workspace?) or a second business domain (is it time for D?). Both transitions are
+additive module calls under the current design.
 
 ---
 
