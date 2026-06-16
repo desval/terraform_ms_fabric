@@ -1,15 +1,19 @@
 output "workspaces" {
-  description = "Workspace and lakehouse IDs for all prod medallion layers"
+  description = "Workspace and lakehouse IDs for all prod medallion layers. Bronze and silver are keyed by data source; gold is a single workspace."
   value = {
     bronze = {
-      workspace_id = module.bronze.workspace_id
-      lakehouse_id = module.bronze.lakehouse_id
-      groups       = module.bronze.group_object_ids
+      for src, mod in module.bronze : src => {
+        workspace_id = mod.workspace_id
+        lakehouse_id = mod.lakehouse_id
+        groups       = mod.group_object_ids
+      }
     }
     silver = {
-      workspace_id = module.silver.workspace_id
-      lakehouse_id = module.silver.lakehouse_id
-      groups       = module.silver.group_object_ids
+      for src, mod in module.silver : src => {
+        workspace_id = mod.workspace_id
+        lakehouse_id = mod.lakehouse_id
+        groups       = mod.group_object_ids
+      }
     }
     gold = {
       workspace_id = module.gold.workspace_id

@@ -16,6 +16,12 @@ variable "layer" {
   }
 }
 
+variable "data_source" {
+  type        = string
+  description = "Optional data source name. When set, scopes the workspace to a single source, producing {env}-{layer}-{source} (e.g. dev-bronze-salesforce). Leave empty for one workspace covering the whole layer (e.g. dev-gold)."
+  default     = ""
+}
+
 variable "capacity_id" {
   type        = string
   description = "Microsoft Fabric capacity ID (UUID) — must exist before workspaces are created"

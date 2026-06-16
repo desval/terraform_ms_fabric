@@ -1,5 +1,7 @@
 locals {
-  name_prefix = "${var.environment}-${var.layer}"
+  # {env}-{layer} for a whole-layer workspace, or {env}-{layer}-{source} when scoped
+  # to a single data source (bronze/silver per-source workspaces).
+  name_prefix = var.data_source == "" ? "${var.environment}-${var.layer}" : "${var.environment}-${var.layer}-${var.data_source}"
 
   layer_descriptions = {
     bronze = "Raw data ingestion — unmodified source data"
