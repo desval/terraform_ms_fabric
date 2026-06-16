@@ -425,6 +425,39 @@ Degree of duplication / readability trade-off:
 growth. Stay explicit (B) while the list is short enough to read at a glance; reach
 for `for_each` once you are adding sources or domains regularly.
 
+#### Blast radius of the code shape
+
+Per-environment isolation is unchanged across all options — separate state per
+directory means a `dev` apply can never touch `prod` (§1). The options differ in
+blast radius *within* a single environment directory:
+
+- **Explicit blocks (A/B)** — each workspace is its own named resource address
+  (`module.bronze`, `module.silver`, …). Removing one is a visible, reviewable code
+  deletion. Hard to fat-finger; the diff shows exactly which workspace is going away.
+
+- **`for_each` (C/D)** — every instance shares one resource address keyed by the
+  source/domain name. Two specific hazards:
+  - **Key removal = destroy.** Deleting `"sap"` from `var.bronze_sources` is a
+    one-line `tfvars` edit, but `terraform plan` will show it as *destroy*
+    `module.bronze["sap"]` — the workspace **and its lakehouse data** are removed.
+    Low friction, high consequence. Always read the plan's destroy lines.
+  - **Key rename = destroy + recreate.** Renaming a key (`"web"` → `"web_events"`)
+    is not an in-place update; Terraform destroys the old instance and creates a new
+    empty one. Use [`terraform state mv`](https://developer.hashicorp.com/terraform/cli/commands/state/mv)
+    or a `moved` block to rename without data loss.
+  - A broken change to the shared module block hits **all** instances in that
+    `for_each` at once, rather than one explicit block you can plan in isolation.
+
+- **Option A** has the largest per-unit blast radius: one workspace holds all three
+  lakehouses, so destroying or misconfiguring it affects bronze, silver, and gold
+  together — the opposite end from B's per-layer boundary.
+
+Mitigations that apply regardless of option: review `terraform plan` for any
+`destroy` line before applying, enable Fabric workspace soft-delete / OneLake
+retention where available, and protect production lakehouses with
+[`lifecycle { prevent_destroy = true }`](https://developer.hashicorp.com/terraform/language/meta-arguments/lifecycle#prevent_destroy)
+in the module.
+
 #### Recommendation
 
 Start at **B**. Move Bronze to **C** the moment you have more than ~2–3 data sources
