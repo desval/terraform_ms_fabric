@@ -23,6 +23,15 @@ az login
 az account set --subscription "<subscription-id>"
 
 # 4. Deploy an environment
+# Safer path: use the repo-root wrapper so the target environment is explicit.
+.\deploy.ps1 -Environment dev -Action plan
+.\deploy.ps1 -Environment dev -Action apply
+
+# Promote to test only when you want to.
+# This runs dev first, then test.
+.\deploy.ps1 -Environment dev -Action apply -PromoteToTest
+
+# Direct Terraform still works, but it is easier to apply the wrong folder.
 cd environments/dev
 terraform init
 terraform plan  -var-file=terraform.tfvars
@@ -92,7 +101,26 @@ and trade-offs of other workspace layouts, see
 | `hashicorp/azuread ~> 3.0` | Entra ID security groups |
 
 Terraform state is stored in Azure Blob Storage (one state file per environment).
-This is a Terraform bookkeeping mechanism — it has no relationship to Fabric itself.
+This is a Terraform bookkeeping mechanism. It has no relationship to Fabric itself,
+and it does not by itself prevent you from selecting the wrong environment directory.
+For that reason, the repo includes a wrapper script that makes the target environment
+explicit and supports dev-to-test promotion in one command.
+
+## Deployment flow
+
+Use the PowerShell wrapper at the repo root for local deployments:
+
+```powershell
+.\deploy.ps1 -Environment dev -Action plan
+.\deploy.ps1 -Environment dev -Action apply
+.\deploy.ps1 -Environment dev -Action apply -PromoteToTest
+```
+
+Rules enforced by the wrapper:
+
+- The environment must be selected explicitly.
+- `test` and `prod` require an extra confirmation flag.
+- `-PromoteToTest` only works from `dev` and runs `test` immediately after a successful `dev` apply.
 
 ---
 

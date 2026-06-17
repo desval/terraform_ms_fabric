@@ -1,0 +1,89 @@
+# Promotion pipeline: dev -> test -> prod, each with its own state and credentials.
+#
+# How the "can't deploy to the wrong environment" guarantee works:
+#   1. Each stage targets a different directory (own state key) AND a different
+#      service connection (own service principal). The dev SP has no rights on
+#      test/prod, so a misconfigured stage fails at AUTH, not at deploy.
+#   2. test and prod apply inside `deployment` jobs bound to ADO Environments
+#      that have MANUAL APPROVAL checks. Nothing reaches test/prod without a
+#      human clicking approve. Local `terraform apply` to test/prod should be
+#      blocked by not handing the test/prod SP secrets to anyone.
+#
+# One-time setup in Azure DevOps (Project settings):
+#   - Service connections: svc-fabric-dev, svc-fabric-test, svc-fabric-prod
+#     (each scoped to that environment's Fabric capacity + state RG only).
+#   - Environments: fabric-dev, fabric-test, fabric-prod. Add an
+#     "Approvals" check (required reviewers) to fabric-test and fabric-prod.
+
+trigger:
+  branches:
+    include:
+      - main
+  paths:
+    include:
+      - environments/**
+      - modules/**
+      - pipelines/**
+      - azure-pipelines.yml
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  TF_IN_AUTOMATION: 'true'
+
+stages:
+# ---------------------------------------------------------------- DEV
+- stage: Dev
+  displayName: 'Dev (auto apply)'
+  jobs:
+    - deployment: ApplyDev
+      environment: fabric-dev        # no approval -> sandbox
+      strategy:
+        runOnce:
+          deploy:
+            steps:
+              - checkout: self
+              - template: pipelines/terraform-steps.yml
+                parameters:
+                  environment: dev
+                  serviceConnection: svc-fabric-dev
+                  applyChanges: true
+
+# ---------------------------------------------------------------- TEST
+- stage: Test
+  displayName: 'Test (manual approval)'
+  dependsOn: Dev
+  condition: succeeded()
+  jobs:
+    - deployment: ApplyTest
+      environment: fabric-test       # add required-reviewer approval in ADO UI
+      strategy:
+        runOnce:
+          deploy:
+            steps:
+              - checkout: self
+              - template: pipelines/terraform-steps.yml
+                parameters:
+                  environment: test
+                  serviceConnection: svc-fabric-test
+                  applyChanges: true
+
+# ---------------------------------------------------------------- PROD
+- stage: Prod
+  displayName: 'Prod (manual approval)'
+  dependsOn: Test
+  condition: succeeded()
+  jobs:
+    - deployment: ApplyProd
+      environment: fabric-prod       # add required-reviewer approval in ADO UI
+      strategy:
+        runOnce:
+          deploy:
+            steps:
+              - checkout: self
+              - template: pipelines/terraform-steps.yml
+                parameters:
+                  environment: prod
+                  serviceConnection: svc-fabric-prod
+                  applyChanges: true
