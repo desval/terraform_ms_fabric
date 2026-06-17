@@ -52,13 +52,19 @@ terraform_ms_fabric/
 
 ## What gets created
 
-Each environment call creates **9 workspaces** via the `fabric_layer_workspace` module:
+**Bronze and silver get one workspace per data source; gold is a single curated
+workspace per environment.** The data sources are listed in each environment's
+`terraform.tfvars` (`data_sources`). With the default three sources
+(`salesforce`, `sap`, `web`), each environment produces **7 workspaces**
+(3 bronze + 3 silver + 1 gold):
 
-| | Bronze | Silver | Gold |
+| | Bronze (per source) | Silver (per source) | Gold |
 |---|---|---|---|
-| dev  | `dev-bronze`  | `dev-silver`  | `dev-gold`  |
-| test | `test-bronze` | `test-silver` | `test-gold` |
-| prod | `prod-bronze` | `prod-silver` | `prod-gold` |
+| dev  | `dev-bronze-salesforce`, `dev-bronze-sap`, `dev-bronze-web`    | `dev-silver-salesforce`, `dev-silver-sap`, `dev-silver-web`    | `dev-gold`  |
+| test | `test-bronze-salesforce`, …                                    | `test-silver-salesforce`, …                                    | `test-gold` |
+| prod | `prod-bronze-salesforce`, …                                    | `prod-silver-salesforce`, …                                    | `prod-gold` |
+
+General formula per environment: `2 × N_sources + 1` workspaces.
 
 Per workspace, the module creates:
 - 1 Fabric workspace
@@ -66,8 +72,9 @@ Per workspace, the module creates:
 - 4 Entra ID security groups (`admin`, `member`, `contributor`, `viewer`)
 - 4 Fabric workspace role assignments (one per group)
 
-This reflects the current layout (Option B). For the resource counts under other
-workspace layouts, see [§3 What gets created per option](#3-ms-fabric-workspace-layout).
+This is the per-source layout (a hybrid of Options B and C). For the resource counts
+and trade-offs of other workspace layouts, see
+[§3 MS Fabric workspace layout](#3-ms-fabric-workspace-layout).
 
 ## Naming conventions
 
