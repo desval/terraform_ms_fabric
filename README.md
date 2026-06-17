@@ -44,9 +44,9 @@ terraform_ms_fabric/
 │   └── prod/
 │       ├── providers.tf          ← provider versions + Azure Blob state backend
 │       ├── variables.tf
-│       ├── main.tf               ← calls the module for bronze, silver, gold
+│       ├── main.tf               ← per-source bronze + silver (for_each) and a single gold
 │       ├── outputs.tf
-│       └── terraform.tfvars      ← capacity_id for this environment
+│       └── terraform.tfvars      ← capacity_id and data_sources for this environment
 └── .claude/agents/ms-fabric-iac.md   ← Claude Code agent for IaC assistance
 ```
 
@@ -80,8 +80,9 @@ and trade-offs of other workspace layouts, see
 
 | Resource | Pattern | Example |
 |---|---|---|
-| Fabric workspace | `{env}-{layer}` | `prod-gold` |
-| Entra ID group | `fabric-{env}-{layer}-{role}` | `fabric-prod-gold-viewer` |
+| Fabric workspace (bronze/silver) | `{env}-{layer}-{source}` | `prod-bronze-salesforce` |
+| Fabric workspace (gold) | `{env}-{layer}` | `prod-gold` |
+| Entra ID group | `fabric-{workspace-name}-{role}` | `fabric-prod-bronze-salesforce-viewer` |
 
 ## Providers
 
@@ -213,7 +214,15 @@ workflow baked into the platform.
 
 #### The choice
 
-**One workspace per medallion layer per environment** — nine workspaces total.
+**Per data source at bronze and silver; a single curated workspace at gold** — a
+hybrid of Options B and C below. With `N` data sources this is `2N + 1` workspaces
+per environment. Bronze and silver are source-aligned because ingestion and cleansing
+logic differ per source; gold is conformed and aggregated across sources, so a single
+workspace per environment is the natural permission and ownership boundary.
+
+The earlier pure per-layer layout (Option B, one workspace per layer) is described
+below as the simplest starting point; the options are kept for context and for
+deciding when to move further (e.g. to full per-domain, Option D).
 
 #### The design space
 
@@ -244,7 +253,7 @@ Simplest to operate, but all three layers share one permission boundary. You can
 grant a consumer Gold-only read access without also exposing Bronze and Silver. Fine
 for a prototype or a single small team; outgrown quickly.
 
-#### Option B — One workspace per layer per environment (9 workspaces, chosen)
+#### Option B — One workspace per layer per environment (9 workspaces)
 
 ```
 dev-bronze    dev-silver    dev-gold
@@ -253,10 +262,11 @@ prod-bronze   prod-silver   prod-gold
 ```
 
 Each layer has its own permission boundary. A Gold consumer group has `Viewer` on
-`prod-gold` and zero access to `prod-bronze` or `prod-silver`. This is the current
-layout. Trade-off accepted: nine workspaces, and cross-layer data flow requires
-OneLake shortcuts (see §9). All sources land together in the single `{env}-bronze`
-workspace — fine until sources multiply or need separate ownership/schedules.
+`prod-gold` and zero access to `prod-bronze` or `prod-silver`. This was the original
+layout and is the simplest starting point. Trade-off: all sources land together in
+the single `{env}-bronze` workspace — fine until sources multiply or need separate
+ownership/schedules, which is exactly why this repo now splits bronze/silver per
+source (see "The choice" above).
 
 #### Option C — Per data source at Bronze, per layer above (chosen if sources grow)
 
@@ -316,6 +326,17 @@ whole environment.)
 Totals are given for the three-environment case. `N` = number of data sources (C) or
 domains (D).
 
+**Chosen layout — per-source bronze + silver, single gold (`2N + 1` workspaces)**
+
+Worked example with **N = 3** sources → `2×3 + 1 = 7` workspaces per env, 21 total:
+
+| Resource | Per workspace | Total (21 ws) | Formula (3 env) |
+|---|---|---|---|
+| Fabric workspace | 1 | 21 | `(2N+1)×3` |
+| Lakehouse | 1 | 21 | `(2N+1)×3` |
+| Entra ID group | 4 | 84 | `(2N+1)×3×4` |
+| Role assignment | 4 | 84 | `(2N+1)×3×4` |
+
 **Option A — one workspace per environment (3 workspaces)**
 
 | Resource | Per environment | Total (×3) |
@@ -325,7 +346,7 @@ domains (D).
 | Entra ID group | 4 | 12 |
 | Role assignment | 4 | 12 |
 
-**Option B — one workspace per layer per environment (9 workspaces, chosen)**
+**Option B — one workspace per layer per environment (9 workspaces)**
 
 | Resource | Per workspace | Total (9 ws) |
 |---|---|---|
@@ -490,8 +511,8 @@ role assignments.
 
 #### Alternatives considered
 
-**A — No module**: Nine copies of every resource definition. Not viable beyond a
-prototype.
+**A — No module**: A hand-written copy of every resource definition for each
+workspace. Not viable beyond a prototype.
 
 **B — Two modules** (`fabric_workspace` + `entra_groups`): Useful if groups are
 managed by a different team in a different state. In a single-team setup, adds
@@ -503,14 +524,14 @@ in the calling code.
 
 **D — One cohesive module (chosen)**: The workspace, lakehouse, groups, and role
 assignments always have the same lifecycle — created and destroyed together. A single
-`terraform destroy` cleanly removes all nine artifacts for a layer.
+`terraform destroy` cleanly removes all 10 artifacts for a workspace.
 
 #### Extending the module
 
 Add new Fabric items (notebooks, data pipelines, warehouses) to
-`modules/fabric_layer_workspace/main.tf`. All nine instantiations pick up the
-change on the next apply. Use a boolean variable (e.g. `enable_data_pipeline =
-false`) for optional items.
+`modules/fabric_layer_workspace/main.tf`. Every workspace instantiation (each
+per-source bronze/silver and the single gold) picks up the change on the next apply.
+Use a boolean variable (e.g. `enable_data_pipeline = false`) for optional items.
 
 ---
 
@@ -521,13 +542,16 @@ false`) for optional items.
 Four security groups per workspace, one per Fabric role:
 
 ```
-fabric-{env}-{layer}-admin
-fabric-{env}-{layer}-member
-fabric-{env}-{layer}-contributor
-fabric-{env}-{layer}-viewer
+fabric-{workspace-name}-admin
+fabric-{workspace-name}-member
+fabric-{workspace-name}-contributor
+fabric-{workspace-name}-viewer
 ```
 
-Total: 4 roles × 9 workspaces = **36 groups**.
+e.g. `fabric-prod-bronze-salesforce-viewer`, `fabric-prod-gold-admin`.
+
+Total: 4 roles × (`2N + 1`) workspaces per environment. With 3 sources across three
+environments that is 4 × 7 × 3 = **84 groups**.
 
 #### Fabric roles
 
@@ -551,8 +575,9 @@ directory.
 
 | Resource | Pattern | Rationale |
 |---|---|---|
-| Fabric workspace | `{env}-{layer}` | Env-first groups all dev workspaces together in the UI |
-| Entra ID group | `fabric-{env}-{layer}-{role}` | `fabric-` prefix namespaces groups from the rest of the tenant |
+| Fabric workspace (bronze/silver) | `{env}-{layer}-{source}` | Env-first groups all dev workspaces together; source suffix keeps each source's stack adjacent |
+| Fabric workspace (gold) | `{env}-{layer}` | Gold is a single per-env workspace, so no source suffix |
+| Entra ID group | `fabric-{workspace-name}-{role}` | Mirrors the workspace name so a group's scope is obvious; `fabric-` prefix namespaces it from the rest of the tenant |
 | Terraform resource | Named by role, not display name | Avoids a destroy/recreate if the display name changes |
 
 Avoid `bronze-dev` (layer-first) — workspaces sort by name in the Fabric UI and
@@ -623,9 +648,10 @@ concern.
 
 #### The problem
 
-The silver workspace needs to read from the bronze lakehouse. The gold workspace
-needs to read from silver. They are in separate workspaces with no automatic data
-sharing.
+Each silver workspace needs to read from its matching bronze lakehouse
+(`{env}-silver-{source}` ← `{env}-bronze-{source}`). The single gold workspace needs
+to read from *all* silver workspaces. They are in separate workspaces with no
+automatic data sharing.
 
 #### Options
 
@@ -648,9 +674,10 @@ permission concern.
 
 #### Access required
 
-For shortcuts or pipeline reads to work, the service principal running the silver
-job needs at least `Viewer` on `{env}-bronze`. Add it to the
-`fabric-{env}-bronze-viewer` Entra group.
+For shortcuts or pipeline reads to work, the service principal running the
+`{env}-silver-{source}` job needs at least `Viewer` on `{env}-bronze-{source}` — add
+it to the `fabric-{env}-bronze-{source}-viewer` group. The gold job needs `Viewer` on
+every `{env}-silver-{source}` it consumes.
 
 ---
 

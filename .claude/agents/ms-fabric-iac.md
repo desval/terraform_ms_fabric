@@ -28,28 +28,36 @@ terraform_ms_fabric/
 │       ├── variables.tf
 │       └── outputs.tf
 └── environments/
-    ├── dev/    ← bronze / silver / gold for dev
-    ├── test/   ← bronze / silver / gold for test
-    └── prod/   ← bronze / silver / gold for prod
+    ├── dev/    ← per-source bronze + silver, single gold for dev
+    ├── test/   ← per-source bronze + silver, single gold for test
+    └── prod/   ← per-source bronze + silver, single gold for prod
         (each env has: providers.tf, variables.tf, main.tf, outputs.tf, terraform.tfvars)
 ```
 
 ## Architecture
 
-**Medallion layers** (one Fabric workspace + one lakehouse per layer per env):
+**Medallion layers** (one Fabric workspace + one lakehouse per workspace). Bronze and
+silver get one workspace **per data source**; gold is a single workspace per env:
 
-| Layer  | Purpose                                         | Entra group suffix  |
-|--------|-------------------------------------------------|---------------------|
-| Bronze | Raw data ingestion — unmodified source data     | `-bronze-{role}`    |
-| Silver | Cleansed & validated — business rules applied   | `-silver-{role}`    |
-| Gold   | Business-ready curated — aggregates and KPIs    | `-gold-{role}`      |
+| Layer  | Scope            | Purpose                                       |
+|--------|------------------|-----------------------------------------------|
+| Bronze | per data source  | Raw data ingestion — unmodified source data   |
+| Silver | per data source  | Cleansed & validated — business rules applied |
+| Gold   | one per env      | Business-ready curated — aggregates and KPIs  |
 
-**Workspace naming**: `{env}-{layer}` → e.g. `dev-bronze`, `prod-gold`
+Data sources are defined per environment in `terraform.tfvars` (`data_sources`), and
+bronze/silver are provisioned with `for_each` over that list.
 
-**Entra ID group naming**: `fabric-{env}-{layer}-{role}`
+**Workspace naming**:
+  - bronze/silver: `{env}-{layer}-{source}` → e.g. `dev-bronze-salesforce`
+  - gold: `{env}-{layer}` → e.g. `prod-gold`
+
+**Entra ID group naming**: `fabric-{workspace-name}-{role}`
   Roles: `admin` | `member` | `contributor` | `viewer`
 
-**Total resources per environment**: 3 workspaces × (1 lakehouse + 4 groups + 4 role assignments) = 27 resources.
+**Total resources per environment**: with `N` data sources, `(2N + 1)` workspaces ×
+(1 lakehouse + 4 groups + 4 role assignments) + the workspace itself = `(2N + 1) × 10`
+resources (70 with the default 3 sources).
 
 ## Terraform providers
 
@@ -109,6 +117,7 @@ Paste the UUID (not the full ARM path) into `terraform.tfvars`.
 | Task                              | What to do                                                                          |
 |-----------------------------------|-------------------------------------------------------------------------------------|
 | Add a new resource to a workspace | Edit `modules/fabric_layer_workspace/main.tf`, then plan & apply all environments  |
+| Add / remove a data source        | Edit `data_sources` in the env's `terraform.tfvars`; plan & check destroy lines    |
 | Onboard a new team                | Add group members via `azuread_group_member` in the module or a separate resource   |
 | Change capacity                   | Update `capacity_id` in the target env's `terraform.tfvars`                         |
 | Promote dev → test                | Ensure test tfvars are correct, then `terraform apply` in `environments/test/`      |
@@ -119,5 +128,6 @@ Paste the UUID (not the full ARM path) into `terraform.tfvars`.
 - Never run `terraform destroy` on `environments/prod/` without explicit user confirmation.
 - Always run `terraform plan` before `terraform apply` and present the diff to the user.
 - Entra ID groups must be `security_enabled = true` to be usable as Fabric principals.
-- Fabric workspace names must be unique within a tenant — the `{env}-{layer}` convention satisfies this.
+- Fabric workspace names must be unique within a tenant — the `{env}-{layer}[-{source}]` convention satisfies this.
+- Removing a source from `data_sources` destroys its bronze and silver workspaces (and lakehouse data) on apply. Renaming a source is a destroy + recreate — use a `moved` block or `terraform state mv`. Always surface destroy lines in the plan.
 - The Fabric capacity must exist before workspaces are created (it is not managed by this repo).
